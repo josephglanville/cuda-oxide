@@ -28,6 +28,13 @@ use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::{cuda_launch, load_kernel_module};
 
+#[derive(Clone, Copy)]
+struct MixedCapture {
+    small: u8,
+    wide: f64,
+    scale: f32,
+}
+
 // =============================================================================
 // CLOSURE-ACCEPTING GENERIC KERNEL
 // =============================================================================
@@ -263,6 +270,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for i in 0..N.min(5) {
                 let x = input_data[i];
                 let expected = w1 * x + w2 + w3 * w4;
+                println!("    [{i}]: got {}, expected {}", output_host[i], expected);
+            }
+        }
+    }
+
+    // =========================================================================
+    // TEST 6: Struct capture with internal padding
+    // =========================================================================
+    println!("Test 6: Struct capture with internal padding");
+    {
+        let mixed = MixedCapture {
+            small: 9,
+            wide: 2.25,
+            scale: 0.75,
+        };
+        println!(
+            "  small = {}, scale = {}, wide = {}",
+            mixed.small, mixed.scale, mixed.wide
+        );
+
+        output_dev = DeviceBuffer::<f32>::zeroed(&stream, N)?;
+
+        // Repro: `cuda_launch!` extracts only the root identifier `mixed`
+        // from this closure, but rustc lowers the closure environment as
+        // separate disjoint captures for the fields used below.
+        cuda_launch! {
+            kernel: map::<f32, _>,
+            stream: stream,
+            module: module,
+            config: LaunchConfig::for_num_elems(N as u32),
+            args: [
+                move |x: f32| x * mixed.scale + mixed.wide as f32 + mixed.small as f32,
+                slice(input_dev),
+                slice_mut(output_dev)
+            ]
+        }?;
+
+        let output_host = output_dev.to_host_vec(&stream)?;
+
+        let errors = (0..N)
+            .filter(|&i| {
+                let x = input_data[i];
+                let expected = x * mixed.scale + mixed.wide as f32 + mixed.small as f32;
+                (output_host[i] - expected).abs() > 1e-5
+            })
+            .count();
+
+        if errors == 0 {
+            println!("  ✓ SUCCESS: All {} elements correct!\n", N);
+        } else {
+            println!("  ✗ FAILED: {} errors\n", errors);
+            failed = true;
+            for i in 0..N.min(5) {
+                let x = input_data[i];
+                let expected = x * mixed.scale + mixed.wide as f32 + mixed.small as f32;
                 println!("    [{i}]: got {}, expected {}", output_host[i], expected);
             }
         }
