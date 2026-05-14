@@ -396,8 +396,8 @@ host memory transparently, at the cost of page-fault latency on first access.
 | **HMM**              | *Any* host memory     | None                   | Medium (page fault + fetch)  | Turing+ on Linux          |
 
 cuda-oxide primarily uses **explicit copies** (`DeviceBuffer`, `DeviceBox`) for
-bulk data and **HMM** for non-move closure captures and small configuration
-data.
+bulk data and **HMM** for references stored inside non-move closure
+environments and for small configuration data.
 
 ### Unified Memory
 
@@ -476,9 +476,9 @@ touch.
 cuda-oxide leverages HMM in two ways:
 
 1. **Non-move closure captures.** When a non-`move` closure is passed to a
-   kernel, captured variables remain on the host stack and the GPU accesses
-   them through HMM pointers. This avoids copying data that the kernel only
-   reads once or infrequently.
+   kernel, the closure environment stores references to captured variables on
+   the host stack and the GPU accesses them through HMM pointers. This avoids
+   copying data that the kernel only reads once or infrequently.
 
 2. **Struct ABI with dynamic layout.** cuda-oxide matches Rust's actual struct
    layout (including `#[repr(Rust)]` field reordering) on the device side, so

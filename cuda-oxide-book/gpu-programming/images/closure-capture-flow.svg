@@ -22,9 +22,9 @@
   <rect width="1260" height="700" fill="url(#grid)" opacity="0.5"/>
 
   <!-- Title -->
-  <text x="630" y="44" text-anchor="middle" font-size="28" font-weight="500" fill="#ffffff" letter-spacing="-0.5">Closure Capture Extraction</text>
+  <text x="630" y="44" text-anchor="middle" font-size="28" font-weight="500" fill="#ffffff" letter-spacing="-0.5">Closure Kernel Launch ABI</text>
   <line x1="360" y1="58" x2="900" y2="58" stroke="url(#titleAccent)" stroke-width="2" opacity="0.8"/>
-  <text x="630" y="84" text-anchor="middle" font-size="16" fill="#b1bac4">How host closures become individual kernel parameters</text>
+  <text x="630" y="84" text-anchor="middle" font-size="16" fill="#b1bac4">How host closures cross the kernel boundary</text>
 
   <!-- ==================== STEP 1: Host closure (blue) ==================== -->
   <g transform="translate(40, 118)">
@@ -40,13 +40,13 @@
 
     <line x1="24" y1="160" x2="326" y2="160" stroke="#30363d" stroke-width="1"/>
 
-    <text x="175" y="190" text-anchor="middle" font-size="14" font-weight="600" fill="#c9d1d9">Macro analyzes AST:</text>
+    <text x="175" y="190" text-anchor="middle" font-size="14" font-weight="600" fill="#c9d1d9">Rust builds closure environment:</text>
 
     <rect x="24" y="206" width="140" height="30" rx="6" fill="rgba(210, 168, 255, 0.12)" stroke="#d2a8ff" stroke-width="1"/>
-    <text x="94" y="226" text-anchor="middle" font-size="12" font-weight="600" fill="#d2a8ff">capture: factor</text>
+    <text x="94" y="226" text-anchor="middle" font-size="12" font-weight="600" fill="#d2a8ff">field: factor</text>
 
     <rect x="180" y="206" width="140" height="30" rx="6" fill="rgba(249, 117, 131, 0.12)" stroke="#f97583" stroke-width="1"/>
-    <text x="250" y="226" text-anchor="middle" font-size="12" font-weight="600" fill="#f97583">capture: offset</text>
+    <text x="250" y="226" text-anchor="middle" font-size="12" font-weight="600" fill="#f97583">field: offset</text>
 
     <rect x="24" y="248" width="296" height="24" rx="6" fill="rgba(121, 192, 255, 0.1)"/>
     <text x="172" y="265" text-anchor="middle" font-size="11" fill="#79c0ff">parameter: x (not a capture)</text>
@@ -56,15 +56,15 @@
   <line x1="398" y1="258" x2="444" y2="258" stroke="#c9d1d9" stroke-width="2" opacity="0.7"/>
   <polygon points="442,252 454,258 442,264" fill="#c9d1d9" opacity="0.7"/>
 
-  <!-- ==================== STEP 2: Scalarized parameters (amber) ==================== -->
+  <!-- ==================== STEP 2: Opaque closure argument (amber) ==================== -->
   <g transform="translate(456, 118)">
     <rect width="350" height="280" rx="12" fill="#161b22" filter="url(#shadow)"/>
     <rect width="350" height="280" rx="12" fill="none" stroke="#e8912d" stroke-width="2"/>
 
     <rect x="2" y="2" width="346" height="44" rx="10" fill="#1c2128"/>
-    <text x="175" y="32" text-anchor="middle" font-size="17" font-weight="700" fill="#e8912d">2. Scalarized params</text>
+    <text x="175" y="32" text-anchor="middle" font-size="17" font-weight="700" fill="#e8912d">2. Opaque argument</text>
 
-    <text x="175" y="76" text-anchor="middle" font-size="13" font-weight="600" fill="#b1bac4">Each capture &#x2192; separate kernel arg</text>
+    <text x="175" y="76" text-anchor="middle" font-size="13" font-weight="600" fill="#b1bac4">Closure environment &#x2192; one kernel arg</text>
 
     <!-- Input slice -->
     <rect x="24" y="96" width="302" height="36" rx="8" fill="rgba(121, 192, 255, 0.1)" stroke="#79c0ff" stroke-width="1"/>
@@ -75,14 +75,13 @@
     <text x="36" y="164" font-family="'RobotoMono', monospace" font-size="12" fill="#79c0ff">param[1]</text>
     <text x="314" y="164" text-anchor="end" font-family="'RobotoMono', monospace" font-size="12" fill="#c9d1d9">input_len: u64</text>
 
-    <!-- Closure captures -->
     <rect x="24" y="188" width="302" height="36" rx="8" fill="rgba(210, 168, 255, 0.12)" stroke="#d2a8ff" stroke-width="1.5"/>
     <text x="36" y="212" font-family="'RobotoMono', monospace" font-size="12" fill="#d2a8ff">param[2]</text>
-    <text x="314" y="212" text-anchor="end" font-family="'RobotoMono', monospace" font-size="12" fill="#d2a8ff">factor: i32 = 3</text>
+    <text x="314" y="212" text-anchor="end" font-family="'RobotoMono', monospace" font-size="12" fill="#d2a8ff">closure_env bytes</text>
 
     <rect x="24" y="232" width="302" height="36" rx="8" fill="rgba(249, 117, 131, 0.12)" stroke="#f97583" stroke-width="1.5"/>
-    <text x="36" y="256" font-family="'RobotoMono', monospace" font-size="12" fill="#f97583">param[3]</text>
-    <text x="314" y="256" text-anchor="end" font-family="'RobotoMono', monospace" font-size="12" fill="#f97583">offset: i32 = 1</text>
+    <text x="36" y="256" font-family="'RobotoMono', monospace" font-size="12" fill="#f97583">layout</text>
+    <text x="314" y="256" text-anchor="end" font-family="'RobotoMono', monospace" font-size="12" fill="#f97583">rustc host layout</text>
   </g>
 
   <!-- Arrow 2→3 -->
@@ -97,17 +96,16 @@
     <rect x="2" y="2" width="346" height="44" rx="10" fill="#1c2128"/>
     <text x="175" y="32" text-anchor="middle" font-size="17" font-weight="700" fill="#d2a8ff">3. Device kernel</text>
 
-    <text x="24" y="76" font-family="'RobotoMono', monospace" font-size="13" fill="#d2a8ff">.entry map_L42C8(</text>
+    <text x="24" y="76" font-family="'RobotoMono', monospace" font-size="13" fill="#d2a8ff">.entry map__typed_...(</text>
     <text x="44" y="100" font-family="'RobotoMono', monospace" font-size="12" fill="#c9d1d9">.param .u64 input_ptr,</text>
     <text x="44" y="120" font-family="'RobotoMono', monospace" font-size="12" fill="#c9d1d9">.param .u64 input_len,</text>
-    <text x="44" y="144" font-family="'RobotoMono', monospace" font-size="12" fill="#d2a8ff">.param .s32 factor,</text>
-    <text x="44" y="164" font-family="'RobotoMono', monospace" font-size="12" fill="#f97583">.param .s32 offset,</text>
+    <text x="44" y="144" font-family="'RobotoMono', monospace" font-size="12" fill="#d2a8ff">.param .b8 closure_env[],</text>
+    <text x="44" y="164" font-family="'RobotoMono', monospace" font-size="12" fill="#f97583">...</text>
     <text x="44" y="188" font-family="'RobotoMono', monospace" font-size="12" fill="#c9d1d9">...</text>
     <text x="24" y="212" font-family="'RobotoMono', monospace" font-size="13" fill="#d2a8ff">)</text>
 
     <line x1="24" y1="228" x2="326" y2="228" stroke="#30363d" stroke-width="1"/>
-    <text x="175" y="258" text-anchor="middle" font-size="13" fill="#c9d1d9">Compiler reconstructs</text>
-    <text x="175" y="278" text-anchor="middle" font-size="13" fill="#c9d1d9">closure from scalar args</text>
+    <text x="175" y="264" text-anchor="middle" font-size="12" fill="#c9d1d9" style="white-space: nowrap">Compiler reconstructs logical closure value</text>
   </g>
 
   <!-- ==================== BOTTOM: Summary ==================== -->
@@ -123,7 +121,7 @@
       <rect width="520" height="120" rx="10" fill="rgba(121, 192, 255, 0.08)" stroke="#79c0ff" stroke-width="1.5"/>
       <rect x="1" y="8" width="3" height="104" rx="1.5" fill="#79c0ff" opacity="0.8"/>
       <text x="266" y="28" text-anchor="middle" font-size="15" font-weight="700" fill="#79c0ff">move |x| x * factor</text>
-      <text x="266" y="54" text-anchor="middle" font-size="13" fill="#c9d1d9">Captures copied by value &#x2192; scalarized as kernel params</text>
+      <text x="266" y="54" text-anchor="middle" font-size="13" fill="#c9d1d9">Environment stores values &#x2192; copied as one arg</text>
       <text x="266" y="78" text-anchor="middle" font-size="13" fill="#b1bac4">Works everywhere &#xB7; No HMM needed &#xB7; Host can drop after launch</text>
       <rect x="186" y="92" width="160" height="22" rx="4" fill="rgba(121, 192, 255, 0.15)"/>
       <text x="266" y="108" text-anchor="middle" font-size="12" font-weight="600" fill="#79c0ff">Recommended default</text>
@@ -134,7 +132,7 @@
       <rect width="520" height="120" rx="10" fill="rgba(232, 145, 45, 0.08)" stroke="#e8912d" stroke-width="1.5"/>
       <rect x="1" y="8" width="3" height="104" rx="1.5" fill="#e8912d" opacity="0.8"/>
       <text x="266" y="28" text-anchor="middle" font-size="15" font-weight="700" fill="#e8912d">|x| x * factor</text>
-      <text x="266" y="54" text-anchor="middle" font-size="13" fill="#c9d1d9">Captures passed as pointers &#x2192; GPU reads via HMM</text>
+      <text x="266" y="54" text-anchor="middle" font-size="13" fill="#c9d1d9">Environment stores pointers &#x2192; GPU reads via HMM</text>
       <text x="266" y="78" text-anchor="middle" font-size="13" fill="#b1bac4">Requires HMM &#xB7; Host variable must stay alive &#xB7; Turing+ only</text>
       <rect x="186" y="92" width="160" height="22" rx="4" fill="rgba(232, 145, 45, 0.15)"/>
       <text x="266" y="108" text-anchor="middle" font-size="12" font-weight="600" fill="#e8912d">Advanced / HMM</text>

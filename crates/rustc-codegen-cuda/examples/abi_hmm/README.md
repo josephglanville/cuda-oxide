@@ -163,23 +163,26 @@ assert_eq!(data.b, 57);  // 10 * 5 + 7 = 57 ✓
 
 ## How Reference Captures Work
 
-For **move closures**, the typed launch method passes each capture by value:
+For **move closures**, Rust builds a closure environment that owns copied
+capture values. The launch path passes that whole environment as one opaque
+kernel argument:
 
 ```rust
 move |p| (*p).b *= scale
-// Launch passes the i128 VALUE
+// The closure environment contains the i128 value.
 ```
 
-For **non-move closures**, the typed launch method passes the **address** of each capture:
+For **non-move closures**, Rust builds a closure environment whose fields are
+references to the captured values. The launch path still passes the whole
+environment as one opaque kernel argument:
 
 ```rust
 |p| (*p).b *= scale
-// Launch marshalling stores:
-//   let __ref_capture = &scale as *const _;
-// which passes the POINTER to host memory
+// The closure environment contains &scale, a pointer to host memory.
 ```
 
-The GPU then accesses this host pointer via HMM to read the value.
+The GPU then accesses the referenced host values via HMM when the closure body
+loads through those reference fields.
 
 ## Requirements
 

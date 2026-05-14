@@ -10,7 +10,7 @@
 //! Demonstrates closure patterns in unified compilation:
 //!
 //! 1. **Inline closures**: Closures defined and used within the kernel (always work)
-//! 2. **Scalarized captures**: Kernel parameters that represent closure captures
+//! 2. **Explicit capture parameters**: Kernel parameters used like captured values
 //! 3. **Closures passed to device functions**: Using FnOnce/Fn traits
 //!
 //! Build and run with:
@@ -30,7 +30,8 @@
 //! 2. Passing them as kernel arguments
 //! 3. Reconstructing the closure on device
 //!
-//! In cuda-oxide unified compilation, we support two patterns:
+//! In cuda-oxide unified compilation, this example focuses on device-side
+//! closure patterns:
 //!
 //! **Pattern A: Inline Closures** (works now!)
 //! ```rust
@@ -43,11 +44,11 @@
 //! }
 //! ```
 //!
-//! **Pattern B: Scalarized Captures** (works now!)
+//! **Pattern B: Explicit Capture Parameters** (works now!)
 //! ```rust
 //! #[kernel]
 //! fn scale_kernel(factor: u32, input: &[u32], mut out: DisjointSlice<u32>) {
-//!     // 'factor' is the closure capture, passed as scalar argument
+//!     // 'factor' is an ordinary kernel parameter used like a capture.
 //!     let idx = thread::index_1d();
 //!     if let Some(slot) = out.get_mut(idx) {
 //!         *slot = input[idx.get()] * factor;
@@ -55,12 +56,12 @@
 //! }
 //! ```
 //!
-//! **Pattern C: True Closures** (future work)
+//! **Pattern C: Host-Supplied Closures** (covered by the `host_closure` example)
 //! ```rust
 //! let factor = 5;
 //! let scale = move |x| x * factor;
 //! module.map_kernel(&stream, config, scale, &input, &mut out)?;
-//! // The typed launch method passes the capture values as kernel arguments
+//! // The launch path passes the closure environment as one opaque argument.
 //! ```
 
 use cuda_device::{DisjointSlice, kernel, thread};
@@ -87,7 +88,7 @@ mod kernels {
         }
     }
 
-    /// Pattern B: Scalarized capture - single value
+    /// Pattern B: explicit capture parameter - single value.
     /// The 'factor' parameter represents what would be a closure capture.
     /// Host passes factor=5, kernel uses it like a captured variable.
     #[kernel]
@@ -100,8 +101,8 @@ mod kernels {
         }
     }
 
-    /// Pattern B: Scalarized captures - multiple values
-    /// Multiple captures (offset, scale) are passed as separate scalar arguments.
+    /// Pattern B: explicit capture parameters - multiple values.
+    /// Multiple ordinary kernel parameters are used like captured values.
     #[kernel]
     pub fn transform_kernel(offset: i32, scale: i32, input: &[i32], mut out: DisjointSlice<i32>) {
         let idx = thread::index_1d();
@@ -280,7 +281,7 @@ fn main() {
     }
 
     // =========================================================================
-    // Test 3: Multiple scalarized captures (offset, scale)
+    // Test 3: Multiple explicit capture parameters (offset, scale)
     // =========================================================================
     println!("Test 3: Multiple captures (transform = |x| (x + offset) * scale)");
     {

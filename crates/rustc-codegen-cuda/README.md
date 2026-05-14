@@ -141,7 +141,7 @@ cargo oxide pipeline <example_name>
 ## Key Design Decisions
 
 - **Device code is `no_std`**. Functions reachable from a `#[kernel]` may only call into `core`, `cuda_device`, or the local crate. Use of `std` or `alloc` is a compile-time error.
-- **Arguments are scalarized** at the host/device boundary. Aggregates (slices, structs) are flattened to scalars for the CUDA launch ABI and reconstructed inside the kernel. This is transparent to the user.
+- **Arguments are scalarized** at the host/device boundary. Non-closure aggregates (slices, structs) are flattened to scalars for the CUDA launch ABI and reconstructed inside the kernel. Closure kernels pass the closure environment as one opaque argument and reconstruct the logical closure value at entry. This is transparent to the user.
 - **Struct layout matches rustc exactly**. Device-side structs use explicit padding derived from rustc's layout queries, so `#[repr(C)]` is not required.
 - **Closures work**. Both `move` closures (capture by value) and non-move closures (capture by reference via HMM) can be passed to kernels.
 - **Unwind paths are unreachable**. The backend ignores all MIR unwind edges, so `panic=abort` and custom sysroots are unnecessary. If a panic condition is hit at runtime, the GPU traps.

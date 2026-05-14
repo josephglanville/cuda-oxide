@@ -89,37 +89,41 @@ module
     .expect("Launch failed");
 ```
 
-### How capture extraction works
+### How closure launch works
 
-The launch macro analyzes the closure at compile time:
+The launch path treats the closure environment as a single Rust value:
 
-1. **Identify captures** -- walk the closure body's AST, collecting identifiers
-   that are not parameters or local bindings. In `move |x| x * factor`, `x` is
-   a parameter and `factor` is a capture.
-2. **Scalarize captures** -- each captured variable becomes a separate kernel
-   parameter (just like {ref}`argument scalarization <memory-argument-scalarization>`).
-3. **Reconstruct on device** -- inside the kernel, the compiler reassembles the
-   closure from its individual scalar fields.
+1. **Monomorphize the closure wrapper** -- the host launch code preserves the
+   closure expression and forces a typed kernel wrapper instantiation for the
+   inferred closure type.
+2. **Pass one opaque argument** -- the closure environment crosses the CUDA
+   kernel ABI as one argument in rustc's host layout. A `move` closure stores
+   copied captures in that environment; a non-move closure stores references to
+   the captured host values.
+3. **Rebuild the logical closure** -- at kernel entry, lowering accepts the
+   host-layout value and reconstructs the logical closure value used by the MIR
+   body, including rustc's declaration-order field semantics.
 
 ```{figure} images/closure-capture-flow.svg
 :align: center
 :width: 100%
 
-Closure capture extraction: the launch macro analyzes the closure AST,
-extracts captured variables (factor, offset), and passes each as a separate
-scalarized kernel parameter. The device kernel reconstructs the closure from
-its individual scalar fields.
+Closure kernel launch: the host passes the closure environment as one opaque
+kernel argument. The device entry reconstructs the logical closure value from
+that host-layout environment before running the kernel body.
 ```
 
 ### PTX naming for closures
 
-Closure kernels get unique PTX names based on source location to avoid
-collisions when multiple closures instantiate the same generic kernel:
+Each closure kernel instantiation has a PTX entry name derived from rustc's
+type-identity fingerprint for the kernel's generic argument tuple. Typed module
+methods and lower-level `cuda_launch_*` macros compute that same name from the
+concrete closure type, so they resolve to the same monomorphized entry:
 
-| Closure                                      | PTX entry point |
-|:---------------------------------------------|:----------------|
-| `move \|x\| x * factor` at line 42, col 8    | `map_L42C8`     |
-| `move \|x\| x + offset` at line 50, col 8    | `map_L50C8`     |
+| Instantiation                         | PTX entry point            |
+|:--------------------------------------|:---------------------------|
+| `map::<i32, {closure type A}>`        | `map__typed_<type-id-A>`   |
+| `map::<i32, {closure type B}>`        | `map__typed_<type-id-B>`   |
 
 ## Move vs reference closures
 
@@ -132,8 +136,8 @@ let factor = 3i32;
 move |x| x * factor   // `factor` is copied to the GPU
 ```
 
-- Each capture is **copied by value** to the device through scalarized kernel
-  parameters.
+- Each capture is **copied by value** into the closure environment, and that
+  environment is copied to the device as one opaque kernel argument.
 - The host value can be dropped after launch.
 - Works on all systems -- no special hardware support needed.
 
@@ -144,7 +148,7 @@ let factor = 3i32;
 |x| x * factor   // `factor` stays on host; GPU accesses via pointer
 ```
 
-- Captures are passed as **pointers to host memory**.
+- The closure environment stores **references to host memory**.
 - The GPU reads them through **Hardware-Managed Memory (HMM)** -- automatic
   page migration from host to device on access.
 - The host variable **must remain alive** until the kernel completes.
@@ -167,8 +171,8 @@ everywhere, and avoid the synchronization hazards of shared host/device memory.
 ## In-kernel closures
 
 Closures defined and called entirely within device code work with normal Rust
-semantics -- no capture extraction or scalarization is involved because
-everything is already on the GPU:
+semantics -- no host closure ABI handling or argument scalarization is involved
+because everything is already on the GPU:
 
 ```rust
 #[kernel]

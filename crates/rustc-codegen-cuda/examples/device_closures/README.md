@@ -249,8 +249,8 @@ Regular helper functions (like `#[device] fn helper(...)`) don't need special ha
 | Test                          | Description                         | Pattern              |
 |-------------------------------|-------------------------------------|----------------------|
 | `test_inline_closure`         | `\|x\| x * 2` inside kernel         | Inline, no captures  |
-| `scale_kernel`                | `input[i] * factor`                 | Scalarized capture   |
-| `transform_kernel`            | `(x + offset) * scale`              | Multiple captures    |
+| `scale_kernel`                | `input[i] * factor`                 | Explicit parameter   |
+| `transform_kernel`            | `(x + offset) * scale`              | Multiple parameters  |
 | `inline_with_param`           | Inline closure using kernel param   | Capture + inline     |
 | `test_closure_constant`       | `\|\| 42`                           | No args, no captures |
 | `test_closure_multi_arg`      | `\|a, b\| a + b`                    | Multiple args        |

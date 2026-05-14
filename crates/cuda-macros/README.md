@@ -151,8 +151,8 @@ cuda_launch! {
 | `expr`                | `T` (scalar)        | `&mut value` as `*mut c_void`       |
 | `slice(buf)`          | `&[T]`              | Device pointer + length (two args)  |
 | `slice_mut(buf)`      | `DisjointSlice<T>`  | Device pointer + length (two args)  |
-| `move \|..\| body`    | Closure `F`         | Each capture by value               |
-| `\|..\| body`         | Closure `F`         | Pointers to captures (HMM)          |
+| `move \|..\| body`    | Closure `F`         | Closure environment by value        |
+| `\|..\| body`         | Closure `F`         | Closure environment by value        |
 
 ### PTX Name Resolution
 
@@ -160,9 +160,10 @@ cuda_launch! {
 |----------------|---------------------------------------------------|
 | Non-generic    | Original function name (`vecadd`)                 |
 | Generic        | `{name}__{sanitized_types}` via `type_name::<T>`  |
-| Closure        | `{name}_L{line}C{col}` via source location        |
+| Closure        | `{name}__typed_{type_id}` via generic type tuple  |
 
 For generics, the macro forces monomorphization with a volatile pointer trick so the kernel appears in the codegen unit even without a host-side call.
+Closure kernel launches use the compiler's type-id fingerprint rather than the public `'static`-only `TypeId::of` API, so borrowed-capture closure types can be named too.
 
 ## `cuda_launch_async!` -- Lower-Level Async Kernel Launch
 

@@ -159,7 +159,7 @@ manual sidecar artifact loading and custom launch code.
 
 ### Argument scalarization
 
-Aggregate types (slices, structs, closures) are **scalarized** at the host/device boundary. A `&[f32]` is decomposed into its `(ptr, len)` components and passed as two separate kernel parameters. On the device side, the compiler reassembles them back into a slice. This avoids ABI mismatches between host and device compilers:
+Aggregate types such as slices and structs are **scalarized** at the host/device boundary. A `&[f32]` is decomposed into its `(ptr, len)` components and passed as two separate kernel parameters. Closure kernels are the exception: the closure environment is passed as one opaque kernel argument so rustc's closure layout is preserved. On the device side, the compiler reassembles the Rust values used by the kernel body. This avoids ABI mismatches between host and device compilers:
 
 ```text
 Host:   module.vecadd(..., &data, ...)

@@ -33,7 +33,7 @@ roadmap, **N/A** = not applicable or no identified need.
 
 | Feature | Status | Description |
 |:--------|:-------|:------------|
-| Move Closures (`FnOnce`) | **Full** | Closures that capture by value. Captures are passed as kernel arguments. `move \|x\| x * factor` pattern. |
+| Move Closures (`FnOnce`) | **Full** | Closures that capture by value. The closure environment is passed as one opaque kernel argument. `move \|x\| x * factor` pattern. |
 | Reference Closures (`Fn`/`FnMut`) | **Full** | Non-move closures that capture by reference. GPU reads host addresses via HMM. |
 | Host-to-Device Closures | **Full** | Closures defined on host passed to generic kernels. Polynomial evaluation with captured coefficients tested. |
 | Device-Internal Closures | **Full** | Closures created and used entirely on device, including closures passed to device functions. |

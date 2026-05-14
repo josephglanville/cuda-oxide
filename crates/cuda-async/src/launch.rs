@@ -99,7 +99,7 @@ impl<'a> AsyncKernelLaunch<'a> {
 
     /// Appends a by-value `Copy` argument to the kernel launch packet.
     ///
-    /// This is the typed-module path used for scalar, raw-pointer, custom
+    /// This is the typed launch path used for scalar, raw-pointer, custom
     /// `Copy` structs, and `Copy` closure arguments.
     #[inline(always)]
     pub fn push_scalar_arg<T: Copy + 'a>(&mut self, arg: T) -> &mut Self {
