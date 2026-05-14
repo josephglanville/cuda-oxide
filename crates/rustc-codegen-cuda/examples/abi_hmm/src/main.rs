@@ -47,10 +47,10 @@ use cuda_host::{cuda_launch, load_kernel_module};
 
 /// A struct with exotic alignment requirements.
 ///
-/// On x86_64 (host):
-/// - `a` at offset 0 (1 byte)
-/// - padding: 15 bytes (to align `b` to 16 bytes)
-/// - `b` at offset 16 (16 bytes)
+/// On x86_64 (host), rustc currently lays this out as:
+/// - `b` at offset 0 (16 bytes)
+/// - `a` at offset 16 (1 byte)
+/// - trailing padding: 15 bytes
 /// - Total size: 32 bytes
 ///
 /// NOTE: No #[repr(C)] - we're testing that our compiler correctly uses rustc's
@@ -157,7 +157,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("  ✓ TEST 1 PASSED: HMM works!");
             println!("    - device_ran=1 proves kernel executed on GPU");
             println!("    - data.b=84 (42*2) proves GPU wrote to host memory");
-            println!("    - Unified ABI correct: device read field b at offset 16");
+            println!(
+                "    - Unified ABI correct: device read field b at offset {}",
+                std::mem::offset_of!(Extreme, b)
+            );
         } else if device_ran == 0 {
             println!("  ✗ TEST 1 FAILED: device_ran=0");
             println!("    Kernel did not execute on GPU");
