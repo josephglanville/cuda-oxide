@@ -94,7 +94,7 @@ pub fn translate_function(
     register_dialects(ctx);
 
     // Translate the function body
-    let func_op = body::translate_body(ctx, body, instance, is_kernel, None, legaliser)?;
+    let func_op = body::translate_body(ctx, body, instance, is_kernel, false, None, legaliser)?;
 
     // Create a builtin.module operation using ModuleOp::new
     let module_name = instance.name();

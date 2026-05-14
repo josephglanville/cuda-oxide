@@ -79,15 +79,41 @@ pub trait CudaKernel {
 ///
 /// # PTX Naming Scheme
 ///
-/// Generic kernels use a hash of `std::any::type_name::<Self>()` to generate
-/// a stable, unique PTX name for each instantiation. The backend uses the same
-/// scheme when generating PTX.
+/// Non-closure generic kernels use `std::any::type_name::<Self>()` to generate
+/// a stable, unique PTX name for each instantiation. Generic closure kernels
+/// use [`typed_kernel_ptx_name`] so all closure launch APIs agree with the
+/// backend's type-identity export name.
 pub trait GenericCudaKernel {
     /// Get the PTX entry point name for this specific instantiation.
     ///
     /// Unlike `CudaKernel::PTX_NAME`, this is a function because the name
     /// depends on the type parameters.
     fn ptx_name() -> &'static str;
+}
+
+/// Returns the typed PTX entry name for a generic closure kernel.
+///
+/// Closure launches use rustc's `TypeId` fingerprint for the tuple of generic
+/// arguments, so typed modules and lower-level launch macros agree on one PTX
+/// entry name for the same closure instantiation. The cuda backend computes the
+/// same fingerprint with `TyCtxt::type_id_hash`.
+#[inline]
+#[doc(hidden)]
+pub fn typed_kernel_ptx_name<GenericArgs>(base: &str) -> &'static str {
+    let type_id = type_id_u128::<GenericArgs>();
+    Box::leak(format!("{base}__typed_{type_id:032x}").into_boxed_str())
+}
+
+#[inline]
+fn type_id_u128<T>() -> u128 {
+    // cuda-oxide is tied to the rustc that builds the backend. The `type_id`
+    // intrinsic is const-evaluated by rustc as `TyCtxt::type_id_hash(ty)`, which
+    // is the same value used by the cuda backend's PTX export naming. Keep this
+    // in a `const` block: rustc backends do not implement this intrinsic at
+    // runtime. Use the intrinsic directly instead of `TypeId::of` because the
+    // public API adds a `'static` bound while the intrinsic itself does not.
+    let type_id = const { core::intrinsics::type_id::<T>() };
+    unsafe { std::mem::transmute::<std::any::TypeId, u128>(type_id) }
 }
 
 // =============================================================================

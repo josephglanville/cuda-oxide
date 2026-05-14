@@ -61,7 +61,10 @@
 //! callee declaration carried `addrspace(3)`. The verifier rejected the
 //! mismatch.
 
-use crate::convert::types::{convert_function_type, convert_type, is_zero_sized_type};
+use crate::convert::types::{
+    ExplicitStructLayout, convert_function_type, convert_type, is_zero_sized_type,
+    llvm_field_indices_for_struct,
+};
 use crate::helpers;
 use dialect_llvm::op_interfaces::CastOpInterface;
 use dialect_llvm::ops as llvm;
@@ -768,7 +771,7 @@ fn flatten_arguments(
             Slice,
             Struct {
                 field_types: Vec<Ptr<TypeObj>>,
-                mem_to_decl: Vec<usize>,
+                layout: ExplicitStructLayout,
             },
             None,
         }
@@ -780,7 +783,11 @@ fn flatten_arguments(
             } else if let Some(struct_ty) = ty_ref.downcast_ref::<MirStructType>() {
                 FlattenKind::Struct {
                     field_types: struct_ty.field_types.clone(),
-                    mem_to_decl: struct_ty.memory_order(),
+                    layout: ExplicitStructLayout {
+                        mem_to_decl: struct_ty.memory_order(),
+                        field_offsets: struct_ty.field_offsets().to_vec(),
+                        total_size: struct_ty.total_size(),
+                    },
                 }
             } else {
                 FlattenKind::None
@@ -824,16 +831,20 @@ fn flatten_arguments(
             }
             FlattenKind::Struct {
                 field_types,
-                mem_to_decl,
+                layout,
             } => {
-                let mut llvm_idx = 0u32;
+                let field_indices = llvm_field_indices_for_struct(ctx, &field_types, &layout)
+                    .map_err(anyhow_to_pliron)?;
                 for mem_idx in 0..field_types.len() {
-                    let decl_idx = mem_to_decl[mem_idx];
+                    let decl_idx = layout.mem_to_decl[mem_idx];
                     let llvm_field_ty =
                         convert_type(ctx, field_types[decl_idx]).map_err(anyhow_to_pliron)?;
                     if is_zero_sized_type(ctx, llvm_field_ty) {
                         continue;
                     }
+                    let Some(llvm_idx) = field_indices[decl_idx] else {
+                        continue;
+                    };
                     let extract_op = llvm::ExtractValueOp::new(ctx, *arg, vec![llvm_idx])?;
                     rewriter.insert_operation(ctx, extract_op.get_operation());
                     let field_val = extract_op.get_operation().deref(ctx).get_result(0);
@@ -847,7 +858,6 @@ fn flatten_arguments(
                     )?;
                     flattened_args.push(field_val);
                     flattened_arg_types.push(field_ty);
-                    llvm_idx += 1;
                 }
             }
             FlattenKind::None => {

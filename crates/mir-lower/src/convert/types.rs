@@ -95,6 +95,17 @@ use pliron::r#type::{TypeObj, type_cast};
 
 use crate::type_conversion_interface::MirTypeConversion;
 
+/// Rust layout metadata for an aggregate value passed as one LLVM argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExplicitStructLayout {
+    /// Memory order mapping: `mem_to_decl[mem_idx] = decl_idx`.
+    pub mem_to_decl: Vec<usize>,
+    /// Byte offset for each field in declaration order.
+    pub field_offsets: Vec<u64>,
+    /// Total aggregate size in bytes, including trailing padding.
+    pub total_size: u64,
+}
+
 // =============================================================================
 // Zero-Sized Type (ZST) Detection
 // =============================================================================
@@ -223,6 +234,20 @@ pub fn convert_function_type(
     ctx: &mut Context,
     func_type: pliron::r#type::TypePtr<FunctionType>,
 ) -> Result<pliron::r#type::TypePtr<llvm_types::FuncType>, anyhow::Error> {
+    convert_function_type_with_opaque_args(ctx, func_type, &[], &[])
+}
+
+/// Convert a MIR function type while keeping selected arguments ABI-opaque.
+///
+/// Arguments listed in `opaque_arg_indices` are converted as a single LLVM
+/// value instead of being flattened as slices or structs. Zero-sized opaque
+/// arguments are omitted from the LLVM signature.
+pub(crate) fn convert_function_type_with_opaque_args(
+    ctx: &mut Context,
+    func_type: pliron::r#type::TypePtr<FunctionType>,
+    opaque_arg_indices: &[usize],
+    opaque_arg_layouts: &[(usize, ExplicitStructLayout)],
+) -> Result<pliron::r#type::TypePtr<llvm_types::FuncType>, anyhow::Error> {
     // Extract input/output types before mutating context
     let (inputs_ptr, results_ptr) = {
         let func_ty_ref = func_type.deref(ctx);
@@ -235,7 +260,36 @@ pub fn convert_function_type(
     let mut inputs = Vec::new();
     let inputs_vec: Vec<_> = inputs_ptr.to_vec();
 
-    for t in inputs_vec {
+    for (arg_idx, t) in inputs_vec.into_iter().enumerate() {
+        if opaque_arg_indices.contains(&arg_idx) {
+            let converted = if let Some((_, layout)) =
+                opaque_arg_layouts.iter().find(|(idx, _)| *idx == arg_idx)
+            {
+                let (field_types, layout) = {
+                    let ty_ref = t.deref(ctx);
+                    let Some(struct_ty) = ty_ref.downcast_ref::<MirStructType>() else {
+                        return Err(anyhow::anyhow!(
+                            "Opaque argument {arg_idx} has explicit layout metadata but is not a struct"
+                        ));
+                    };
+                    (struct_ty.field_types.clone(), layout.clone())
+                };
+                build_struct_with_explicit_padding(
+                    ctx,
+                    &field_types,
+                    &layout.mem_to_decl,
+                    &layout.field_offsets,
+                    layout.total_size,
+                )?
+            } else {
+                convert_type(ctx, t)?
+            };
+            if !is_zero_sized_type(ctx, converted) {
+                inputs.push(converted);
+            }
+            continue;
+        }
+
         // Determine what kind of flattening this type needs
         // Extract all info first, then drop the borrow
         enum FlattenKind {
@@ -347,6 +401,15 @@ pub(crate) fn build_struct_with_explicit_padding(
     field_offsets: &[u64],
     total_size: u64,
 ) -> Result<Ptr<TypeObj>, anyhow::Error> {
+    let mem_to_decl = normalized_mem_to_decl(field_types.len(), mem_to_decl)?;
+    if field_offsets.len() != field_types.len() {
+        return Err(anyhow::anyhow!(
+            "Explicit struct layout has {} field offsets for {} fields",
+            field_offsets.len(),
+            field_types.len()
+        ));
+    }
+
     let mut llvm_fields: Vec<Ptr<TypeObj>> = Vec::new();
     let mut current_offset: u64 = 0;
 
@@ -355,6 +418,8 @@ pub(crate) fn build_struct_with_explicit_padding(
         let decl_idx = mem_to_decl[mem_idx];
         let field_ty = field_types[decl_idx];
         let target_offset = field_offsets[decl_idx];
+        let llvm_ty = convert_type(ctx, field_ty)?;
+        let field_is_zst = is_zero_sized_type(ctx, llvm_ty);
 
         // Insert padding if needed to reach the target offset
         if current_offset < target_offset {
@@ -362,13 +427,14 @@ pub(crate) fn build_struct_with_explicit_padding(
             let padding_ty = make_padding_type(ctx, padding_size);
             llvm_fields.push(padding_ty);
             current_offset = target_offset;
+        } else if current_offset > target_offset && !field_is_zst {
+            return Err(anyhow::anyhow!(
+                "Explicit struct layout places non-ZST field {decl_idx} at byte offset {target_offset}, before current offset {current_offset}"
+            ));
         }
 
-        // Convert and add the field
-        let llvm_ty = convert_type(ctx, field_ty)?;
-
         // Skip ZST fields (PhantomData) - they have no size
-        if is_zero_sized_type(ctx, llvm_ty) {
+        if field_is_zst {
             continue;
         }
 
@@ -384,9 +450,119 @@ pub(crate) fn build_struct_with_explicit_padding(
         let trailing_padding = total_size - current_offset;
         let padding_ty = make_padding_type(ctx, trailing_padding);
         llvm_fields.push(padding_ty);
+    } else if current_offset > total_size {
+        return Err(anyhow::anyhow!(
+            "Explicit struct layout size {total_size} is smaller than occupied field size {current_offset}"
+        ));
     }
 
     Ok(llvm_types::StructType::get_unnamed(ctx, llvm_fields).into())
+}
+
+/// Return the LLVM aggregate index for each declaration-order field.
+///
+/// This mirrors [`build_struct_with_explicit_padding`]. Explicit Rust layouts
+/// may introduce padding array fields before, between, or after real fields; the
+/// returned indices point only at real non-ZST fields. ZST fields map to `None`.
+pub(crate) fn llvm_field_indices_for_struct(
+    ctx: &mut Context,
+    field_types: &[Ptr<TypeObj>],
+    layout: &ExplicitStructLayout,
+) -> Result<Vec<Option<u32>>, anyhow::Error> {
+    let mut indices = vec![None; field_types.len()];
+    let mem_to_decl = normalized_mem_to_decl(field_types.len(), &layout.mem_to_decl)?;
+    let has_explicit_layout = !layout.field_offsets.is_empty() && layout.total_size > 0;
+    if has_explicit_layout && layout.field_offsets.len() != field_types.len() {
+        return Err(anyhow::anyhow!(
+            "Explicit struct layout has {} field offsets for {} fields",
+            layout.field_offsets.len(),
+            field_types.len()
+        ));
+    }
+
+    let mut current_offset = 0u64;
+    let mut llvm_idx = 0u32;
+
+    for (mem_idx, decl_idx) in mem_to_decl.iter().copied().enumerate() {
+        if decl_idx >= field_types.len() {
+            return Err(anyhow::anyhow!(
+                "Invalid struct memory order: mem_to_decl[{mem_idx}] = {decl_idx}, field count = {}",
+                field_types.len()
+            ));
+        }
+
+        let llvm_ty = convert_type(ctx, field_types[decl_idx])?;
+        let field_is_zst = is_zero_sized_type(ctx, llvm_ty);
+
+        if has_explicit_layout {
+            let target_offset = *layout.field_offsets.get(decl_idx).ok_or_else(|| {
+                anyhow::anyhow!("Missing explicit layout offset for declaration field {decl_idx}")
+            })?;
+            if current_offset < target_offset {
+                llvm_idx += 1; // Padding array field.
+                current_offset = target_offset;
+            } else if current_offset > target_offset && !field_is_zst {
+                return Err(anyhow::anyhow!(
+                    "Explicit struct layout places non-ZST field {decl_idx} at byte offset {target_offset}, before current offset {current_offset}"
+                ));
+            }
+        }
+
+        if field_is_zst {
+            continue;
+        }
+
+        indices[decl_idx] = Some(llvm_idx);
+        llvm_idx += 1;
+
+        if has_explicit_layout {
+            current_offset += get_type_size(ctx, llvm_ty);
+        }
+    }
+
+    if has_explicit_layout && current_offset > layout.total_size {
+        return Err(anyhow::anyhow!(
+            "Explicit struct layout size {} is smaller than occupied field size {current_offset}",
+            layout.total_size
+        ));
+    }
+
+    Ok(indices)
+}
+
+fn normalized_mem_to_decl(
+    field_count: usize,
+    mem_to_decl: &[usize],
+) -> Result<Vec<usize>, anyhow::Error> {
+    let order: Vec<usize> = if mem_to_decl.is_empty() {
+        (0..field_count).collect()
+    } else {
+        if mem_to_decl.len() != field_count {
+            return Err(anyhow::anyhow!(
+                "Struct memory order has {} entries for {} fields",
+                mem_to_decl.len(),
+                field_count
+            ));
+        }
+        mem_to_decl.to_vec()
+    };
+
+    let mut seen = vec![false; field_count];
+    for (mem_idx, &decl_idx) in order.iter().enumerate() {
+        if decl_idx >= field_count {
+            return Err(anyhow::anyhow!(
+                "Invalid struct memory order: mem_to_decl[{mem_idx}] = {decl_idx}, field count = {field_count}"
+            ));
+        }
+        if seen[decl_idx] {
+            return Err(anyhow::anyhow!(
+                "Invalid struct memory order: declaration field {decl_idx} appears more than once"
+            ));
+        }
+        seen[decl_idx] = true;
+    }
+
+    Ok(order)
 }
 
 /// Create a padding type: `[N x i8]` for N bytes of padding.

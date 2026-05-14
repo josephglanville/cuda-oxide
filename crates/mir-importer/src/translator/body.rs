@@ -63,6 +63,21 @@ pub struct LaunchBounds {
     pub min_blocks: u32,
 }
 
+/// Exact host layout for an opaque closure kernel argument.
+///
+/// Closure kernel entries pass the closure environment as one CUDA argument.
+/// The ABI value arrives in rustc's host memory layout, while the MIR wrapper
+/// body still expects the logical closure type with fields addressed by
+/// declaration index. This metadata lets LLVM lowering accept the host-layout
+/// value at the kernel boundary and rebuild the logical value used by the body.
+#[derive(Debug, Clone)]
+struct OpaqueKernelArgLayout {
+    arg_index: usize,
+    mem_to_decl: Vec<usize>,
+    field_offsets: Vec<u64>,
+    total_size: u64,
+}
+
 /// Scans MIR for `__cluster_config::<X, Y, Z>()` marker and extracts cluster dimensions.
 ///
 /// The `#[cluster(x,y,z)]` macro injects this call at the start of the kernel.
@@ -203,6 +218,125 @@ fn compute_reachable_blocks(body: &mir::Body) -> std::collections::BTreeSet<usiz
     reachable
 }
 
+fn opaque_closure_arg_layout(
+    arg_index: usize,
+    rust_ty: &rustc_public::ty::Ty,
+    field_count: usize,
+) -> TranslationResult<Option<OpaqueKernelArgLayout>> {
+    if field_count == 0 {
+        return Ok(None);
+    }
+
+    let layout = match rust_ty.layout() {
+        Ok(layout) => layout,
+        Err(err) => {
+            return input_err_noloc!(TranslationErr::type_error(format!(
+                "opaque closure argument {arg_index} requires rustc layout metadata: {err}"
+            )));
+        }
+    };
+    let shape = layout.shape();
+    let total_size = shape.size.bytes() as u64;
+    if total_size == 0 {
+        return Ok(None);
+    }
+
+    let mut mem_to_decl = shape.fields.fields_by_offset_order();
+    if mem_to_decl.is_empty() {
+        mem_to_decl = (0..field_count).collect();
+    }
+    validate_layout_order(arg_index, field_count, &mem_to_decl)?;
+
+    let field_offsets: Vec<u64> = match &shape.fields {
+        rustc_public::abi::FieldsShape::Arbitrary { offsets } => {
+            offsets.iter().map(|offset| offset.bytes() as u64).collect()
+        }
+        rustc_public::abi::FieldsShape::Primitive if field_count == 1 => vec![0],
+        rustc_public::abi::FieldsShape::Primitive if field_count == 0 => vec![],
+        other => {
+            return input_err_noloc!(TranslationErr::unsupported(format!(
+                "opaque closure argument {arg_index} has unsupported field layout shape {other:?}"
+            )));
+        }
+    };
+
+    if field_offsets.len() != field_count {
+        return input_err_noloc!(TranslationErr::type_error(format!(
+            "opaque closure argument {arg_index} layout has {} field offsets for {field_count} captures",
+            field_offsets.len()
+        )));
+    }
+
+    Ok(Some(OpaqueKernelArgLayout {
+        arg_index,
+        mem_to_decl,
+        field_offsets,
+        total_size,
+    }))
+}
+
+fn validate_layout_order(
+    arg_index: usize,
+    field_count: usize,
+    mem_to_decl: &[usize],
+) -> TranslationResult<()> {
+    if mem_to_decl.len() != field_count {
+        return input_err_noloc!(TranslationErr::type_error(format!(
+            "opaque closure argument {arg_index} memory order has {} entries for {field_count} captures",
+            mem_to_decl.len()
+        )));
+    }
+
+    let mut seen = vec![false; field_count];
+    for (mem_idx, &decl_idx) in mem_to_decl.iter().enumerate() {
+        if decl_idx >= field_count {
+            return input_err_noloc!(TranslationErr::type_error(format!(
+                "opaque closure argument {arg_index} memory order entry {mem_idx} points at missing capture {decl_idx}"
+            )));
+        }
+        if seen[decl_idx] {
+            return input_err_noloc!(TranslationErr::type_error(format!(
+                "opaque closure argument {arg_index} memory order repeats capture {decl_idx}"
+            )));
+        }
+        seen[decl_idx] = true;
+    }
+
+    Ok(())
+}
+
+fn encode_opaque_kernel_arg_layouts(layouts: &[OpaqueKernelArgLayout]) -> String {
+    layouts
+        .iter()
+        .map(|layout| {
+            format!(
+                "{}:{}:{}:{}",
+                layout.arg_index,
+                encode_usize_list(&layout.mem_to_decl),
+                encode_u64_list(&layout.field_offsets),
+                layout.total_size
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn encode_usize_list(values: &[usize]) -> String {
+    values
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn encode_u64_list(values: &[u64]) -> String {
+    values
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Emit one `mir.alloca` per non-ZST MIR local at the top of the entry block,
 /// then store each function argument into its backing slot.
 ///
@@ -300,12 +434,14 @@ fn emit_entry_allocas(
 /// * `body` - MIR function body
 /// * `instance` - Monomorphized instance (with concrete generic args)
 /// * `is_kernel` - Add `gpu_kernel` attribute for kernel entry points
+/// * `_typed_closure_entry` - Name-selection marker; closure kernel args are always opaque
 /// * `override_name` - Custom export name (defaults to instance name)
 pub fn translate_body(
     ctx: &mut Context,
     body: &mir::Body,
     instance: &mono::Instance,
     is_kernel: bool,
+    _typed_closure_entry: bool,
     override_name: Option<&str>,
     legaliser: &mut Legaliser,
 ) -> TranslationResult<Ptr<Operation>> {
@@ -368,12 +504,32 @@ pub fn translate_body(
         }
     };
 
+    let mut opaque_arg_indices = Vec::new();
+    let mut opaque_arg_layouts = Vec::new();
     for arg_idx in 0..num_args {
         // MIR local index for arguments: local 1, 2, 3, ... (0 is return value)
         let local = mir::Local::from(arg_idx + 1);
         let local_decl = &body.locals()[local];
         let ty = &local_decl.ty;
+        let is_opaque_closure_arg = is_kernel
+            && matches!(
+                ty.kind(),
+                rustc_public::ty::TyKind::RigidTy(rustc_public::ty::RigidTy::Closure(_, _))
+            );
         let arg_type = types::translate_type(ctx, ty)?;
+        if is_opaque_closure_arg {
+            opaque_arg_indices.push(arg_idx);
+            let field_count = {
+                let arg_type_ref = arg_type.deref(ctx);
+                arg_type_ref
+                    .downcast_ref::<dialect_mir::types::MirStructType>()
+                    .map(|struct_ty| struct_ty.field_count())
+                    .unwrap_or(0)
+            };
+            if let Some(layout) = opaque_closure_arg_layout(arg_idx, ty, field_count)? {
+                opaque_arg_layouts.push(layout);
+            }
+        }
         arg_types.push(arg_type);
     }
 
@@ -451,6 +607,34 @@ pub fn translate_body(
             .attributes
             .0
             .insert(key, kernel_attr.into());
+
+        if !opaque_arg_indices.is_empty() {
+            use pliron::builtin::attributes::StringAttr;
+            let opaque_args = opaque_arg_indices
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let key: Identifier = "opaque_kernel_args".try_into().unwrap();
+            mir_func_op
+                .get_operation()
+                .deref_mut(ctx)
+                .attributes
+                .0
+                .insert(key, StringAttr::new(opaque_args).into());
+        }
+
+        if !opaque_arg_layouts.is_empty() {
+            use pliron::builtin::attributes::StringAttr;
+            let key: Identifier = "opaque_kernel_arg_layouts".try_into().unwrap();
+            let encoded_layouts = encode_opaque_kernel_arg_layouts(&opaque_arg_layouts);
+            mir_func_op
+                .get_operation()
+                .deref_mut(ctx)
+                .attributes
+                .0
+                .insert(key, StringAttr::new(encoded_layouts).into());
+        }
 
         // Detect compile-time cluster configuration from #[cluster(x,y,z)] attribute
         if let Some(cluster_dims) = detect_cluster_config(body) {

@@ -28,7 +28,10 @@
 //! ```
 
 use crate::context::{DynamicSmemAlignmentMap, SharedGlobalsMap};
-use crate::convert::types::{convert_function_type, convert_type, is_zero_sized_type};
+use crate::convert::types::{
+    ExplicitStructLayout, convert_function_type_with_opaque_args, convert_type, is_zero_sized_type,
+    llvm_field_indices_for_struct,
+};
 
 use dialect_llvm::ops as llvm;
 use dialect_mir::ops::MirFuncOp;
@@ -75,9 +78,17 @@ pub fn convert_func(
 
     let kernel_key: pliron::identifier::Identifier = "gpu_kernel".try_into().unwrap();
     let is_kernel = op.deref(ctx).attributes.0.contains_key(&kernel_key);
+    let opaque_arg_indices = opaque_kernel_arg_indices(ctx, op);
+    let opaque_arg_layouts = opaque_kernel_arg_layouts(ctx, op).map_err(anyhow_to_pliron)?;
 
     let func_type = mir_func.get_type(ctx);
-    let llvm_func_type = convert_function_type(ctx, func_type).map_err(anyhow_to_pliron)?;
+    let llvm_func_type = convert_function_type_with_opaque_args(
+        ctx,
+        func_type,
+        &opaque_arg_indices,
+        &opaque_arg_layouts,
+    )
+    .map_err(anyhow_to_pliron)?;
 
     let llvm_func = llvm::FuncOp::new(ctx, name, llvm_func_type);
 
@@ -112,8 +123,14 @@ pub fn convert_func(
             ft_ref.arg_types().to_vec()
         };
 
-        let reconstructed_args =
-            build_entry_prologue(ctx, &mir_arg_types, llvm_entry).map_err(anyhow_to_pliron)?;
+        let reconstructed_args = build_entry_prologue(
+            ctx,
+            &mir_arg_types,
+            llvm_entry,
+            &opaque_arg_indices,
+            &opaque_arg_layouts,
+        )
+        .map_err(anyhow_to_pliron)?;
 
         rewriter.inline_region(ctx, mir_region, BlockInsertionPoint::AfterBlock(llvm_entry));
 
@@ -180,6 +197,113 @@ fn propagate_kernel_attrs(
     }
 }
 
+fn opaque_kernel_arg_indices(ctx: &Context, op: Ptr<Operation>) -> Vec<usize> {
+    let key: pliron::identifier::Identifier = "opaque_kernel_args".try_into().unwrap();
+    let attr = {
+        let op_ref = op.deref(ctx);
+        let Some(attr) = op_ref.attributes.0.get(&key) else {
+            return Vec::new();
+        };
+        attr.clone()
+    };
+    let Some(attr) = attr.downcast_ref::<pliron::builtin::attributes::StringAttr>() else {
+        return Vec::new();
+    };
+    let value = String::from((*attr).clone());
+    value
+        .split(',')
+        .filter_map(|part| part.parse::<usize>().ok())
+        .collect()
+}
+
+fn opaque_kernel_arg_layouts(
+    ctx: &Context,
+    op: Ptr<Operation>,
+) -> std::result::Result<Vec<(usize, ExplicitStructLayout)>, anyhow::Error> {
+    let key: pliron::identifier::Identifier = "opaque_kernel_arg_layouts".try_into().unwrap();
+    let attr = {
+        let op_ref = op.deref(ctx);
+        let Some(attr) = op_ref.attributes.0.get(&key) else {
+            return Ok(Vec::new());
+        };
+        attr.clone()
+    };
+    let Some(attr) = attr.downcast_ref::<pliron::builtin::attributes::StringAttr>() else {
+        return Err(anyhow::anyhow!(
+            "opaque_kernel_arg_layouts attribute must be a string"
+        ));
+    };
+    let value = String::from((*attr).clone());
+    if value.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut layouts = Vec::new();
+    for entry in value.split(';') {
+        if entry.is_empty() {
+            continue;
+        }
+        let parts: Vec<_> = entry.split(':').collect();
+        if parts.len() != 4 {
+            return Err(anyhow::anyhow!(
+                "Invalid opaque kernel arg layout entry `{entry}`"
+            ));
+        }
+
+        let arg_index = parts[0].parse::<usize>().map_err(|err| {
+            anyhow::anyhow!(
+                "Invalid opaque kernel arg layout index `{}`: {err}",
+                parts[0]
+            )
+        })?;
+        let mem_to_decl = parse_usize_list(parts[1], "memory order")?;
+        let field_offsets = parse_u64_list(parts[2], "field offsets")?;
+        let total_size = parts[3].parse::<u64>().map_err(|err| {
+            anyhow::anyhow!(
+                "Invalid opaque kernel arg layout total size `{}`: {err}",
+                parts[3]
+            )
+        })?;
+
+        layouts.push((
+            arg_index,
+            ExplicitStructLayout {
+                mem_to_decl,
+                field_offsets,
+                total_size,
+            },
+        ));
+    }
+
+    Ok(layouts)
+}
+
+fn parse_usize_list(value: &str, label: &str) -> std::result::Result<Vec<usize>, anyhow::Error> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split(',')
+        .map(|part| {
+            part.parse::<usize>()
+                .map_err(|err| anyhow::anyhow!("Invalid {label} value `{part}`: {err}"))
+        })
+        .collect()
+}
+
+fn parse_u64_list(value: &str, label: &str) -> std::result::Result<Vec<u64>, anyhow::Error> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split(',')
+        .map(|part| {
+            part.parse::<u64>()
+                .map_err(|err| anyhow::anyhow!("Invalid {label} value `{part}`: {err}"))
+        })
+        .collect()
+}
+
 // ============================================================================
 // Entry Block Prologue
 // ============================================================================
@@ -195,14 +319,40 @@ fn build_entry_prologue(
     ctx: &mut Context,
     mir_arg_types: &[Ptr<TypeObj>],
     llvm_entry: Ptr<BasicBlock>,
+    opaque_arg_indices: &[usize],
+    opaque_arg_layouts: &[(usize, ExplicitStructLayout)],
 ) -> std::result::Result<Vec<Value>, anyhow::Error> {
     let llvm_args: Vec<_> = llvm_entry.deref(ctx).arguments().collect();
     let mut llvm_arg_idx = 0;
     let mut last_op: Option<Ptr<Operation>> = None;
     let mut result_args = Vec::new();
 
-    for &mir_ty in mir_arg_types {
-        let kind = classify_argument_type(ctx, mir_ty);
+    for (arg_idx, &mir_ty) in mir_arg_types.iter().enumerate() {
+        if let Some((_, layout)) = opaque_arg_layouts
+            .iter()
+            .find(|(layout_arg_idx, _)| *layout_arg_idx == arg_idx)
+        {
+            if llvm_arg_idx >= llvm_args.len() {
+                return Err(anyhow::anyhow!(
+                    "Entry block arg mismatch: no LLVM arg available for opaque struct argument {arg_idx}"
+                ));
+            }
+            let opaque_val = llvm_args[llvm_arg_idx];
+            llvm_arg_idx += 1;
+
+            let (val, new_last) = reconstruct_opaque_struct_arg(
+                ctx, llvm_entry, last_op, mir_ty, opaque_val, layout,
+            )?;
+            last_op = Some(new_last);
+            result_args.push(val);
+            continue;
+        }
+
+        let kind = if opaque_arg_indices.contains(&arg_idx) {
+            classify_opaque_argument_type(ctx, mir_ty)?
+        } else {
+            classify_argument_type(ctx, mir_ty)
+        };
 
         match kind {
             ReconstructKind::Slice => {
@@ -246,6 +396,11 @@ fn build_entry_prologue(
                 result_args.push(llvm_args[llvm_arg_idx]);
                 llvm_arg_idx += 1;
             }
+            ReconstructKind::ZeroSized => {
+                let (val, new_last) = reconstruct_zero_sized(ctx, llvm_entry, last_op, mir_ty)?;
+                last_op = Some(new_last);
+                result_args.push(val);
+            }
         }
     }
 
@@ -264,6 +419,8 @@ enum ReconstructKind {
     Struct(usize),
     /// A simple type that passes through without reconstruction.
     None,
+    /// A zero-sized opaque aggregate omitted from the LLVM entry signature.
+    ZeroSized,
 }
 
 /// Classify an argument type to determine how to reconstruct it from
@@ -292,6 +449,18 @@ fn classify_argument_type(ctx: &mut Context, arg_ty: Ptr<TypeObj>) -> Reconstruc
         ReconstructKind::Struct(non_zst_count)
     } else {
         ReconstructKind::None
+    }
+}
+
+fn classify_opaque_argument_type(
+    ctx: &mut Context,
+    arg_ty: Ptr<TypeObj>,
+) -> std::result::Result<ReconstructKind, anyhow::Error> {
+    let converted = convert_type(ctx, arg_ty)?;
+    if is_zero_sized_type(ctx, converted) {
+        Ok(ReconstructKind::ZeroSized)
+    } else {
+        Ok(ReconstructKind::None)
     }
 }
 
@@ -343,6 +512,8 @@ fn reconstruct_struct(
     field_vals: &[Value],
 ) -> std::result::Result<(Value, Ptr<Operation>), anyhow::Error> {
     let struct_ty = convert_type(ctx, mir_ty)?;
+    let (field_types, layout) = struct_layout_for_mir_type(ctx, mir_ty)?;
+    let field_indices = llvm_field_indices_for_struct(ctx, &field_types, &layout)?;
 
     let undef = llvm::UndefOp::new(ctx, struct_ty);
     let undef_op = undef.get_operation();
@@ -350,16 +521,134 @@ fn reconstruct_struct(
     let mut current_struct = undef_op.deref(ctx).get_result(0);
     let mut last_op = undef_op;
 
-    for (field_idx, field_val) in field_vals.iter().enumerate() {
-        let insert_field =
-            llvm::InsertValueOp::new(ctx, current_struct, *field_val, vec![field_idx as u32]);
+    let mut field_val_idx = 0;
+    for mem_idx in 0..field_types.len() {
+        let decl_idx = layout.mem_to_decl[mem_idx];
+        let llvm_ty = convert_type(ctx, field_types[decl_idx])?;
+        if is_zero_sized_type(ctx, llvm_ty) {
+            continue;
+        }
+        let field_val = *field_vals.get(field_val_idx).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Entry block arg mismatch: missing flattened value for struct field {decl_idx}"
+            )
+        })?;
+        field_val_idx += 1;
+
+        let Some(llvm_idx) = field_indices[decl_idx] else {
+            return Err(anyhow::anyhow!(
+                "Struct field {decl_idx} has no LLVM field for reconstruction"
+            ));
+        };
+
+        let insert_field = llvm::InsertValueOp::new(ctx, current_struct, field_val, vec![llvm_idx]);
         let insert_op = insert_field.get_operation();
         insert_op.insert_after(ctx, last_op);
         current_struct = insert_op.deref(ctx).get_result(0);
         last_op = insert_op;
     }
 
+    if field_val_idx != field_vals.len() {
+        return Err(anyhow::anyhow!(
+            "Entry block arg mismatch: {} unused flattened struct values",
+            field_vals.len() - field_val_idx
+        ));
+    }
+
     Ok((current_struct, last_op))
+}
+
+fn reconstruct_opaque_struct_arg(
+    ctx: &mut Context,
+    llvm_block: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    mir_ty: Ptr<TypeObj>,
+    opaque_val: Value,
+    host_layout: &ExplicitStructLayout,
+) -> std::result::Result<(Value, Ptr<Operation>), anyhow::Error> {
+    let logical_struct_ty = convert_type(ctx, mir_ty)?;
+    if is_zero_sized_type(ctx, logical_struct_ty) {
+        return reconstruct_zero_sized(ctx, llvm_block, prev_op, mir_ty);
+    }
+
+    let (field_types, _) = struct_layout_for_mir_type(ctx, mir_ty)?;
+    let host_field_indices = llvm_field_indices_for_struct(ctx, &field_types, host_layout)?;
+    let logical_layout = ExplicitStructLayout {
+        mem_to_decl: (0..field_types.len()).collect(),
+        field_offsets: vec![],
+        total_size: 0,
+    };
+    let logical_field_indices = llvm_field_indices_for_struct(ctx, &field_types, &logical_layout)?;
+
+    let undef = llvm::UndefOp::new(ctx, logical_struct_ty);
+    let undef_op = undef.get_operation();
+    insert_op_sequentially(undef_op, llvm_block, prev_op, ctx);
+    let mut current_struct = undef_op.deref(ctx).get_result(0);
+    let mut last_op = undef_op;
+
+    for (decl_idx, &field_ty) in field_types.iter().enumerate() {
+        let llvm_ty = convert_type(ctx, field_ty)?;
+        if is_zero_sized_type(ctx, llvm_ty) {
+            continue;
+        }
+
+        let Some(host_idx) = host_field_indices[decl_idx] else {
+            return Err(anyhow::anyhow!(
+                "Opaque struct field {decl_idx} has no host-layout LLVM field"
+            ));
+        };
+        let Some(logical_idx) = logical_field_indices[decl_idx] else {
+            return Err(anyhow::anyhow!(
+                "Opaque struct field {decl_idx} has no logical LLVM field"
+            ));
+        };
+
+        let extract_op = llvm::ExtractValueOp::new(ctx, opaque_val, vec![host_idx])?;
+        let extract_operation = extract_op.get_operation();
+        extract_operation.insert_after(ctx, last_op);
+        let field_val = extract_operation.deref(ctx).get_result(0);
+
+        let insert_op = llvm::InsertValueOp::new(ctx, current_struct, field_val, vec![logical_idx]);
+        let insert_operation = insert_op.get_operation();
+        insert_operation.insert_after(ctx, extract_operation);
+        current_struct = insert_operation.deref(ctx).get_result(0);
+        last_op = insert_operation;
+    }
+
+    Ok((current_struct, last_op))
+}
+
+fn struct_layout_for_mir_type(
+    ctx: &Context,
+    mir_ty: Ptr<TypeObj>,
+) -> std::result::Result<(Vec<Ptr<TypeObj>>, ExplicitStructLayout), anyhow::Error> {
+    let ty_ref = mir_ty.deref(ctx);
+    let Some(struct_ty) = ty_ref.downcast_ref::<MirStructType>() else {
+        return Err(anyhow::anyhow!(
+            "Expected MIR struct type for aggregate reconstruction"
+        ));
+    };
+    Ok((
+        struct_ty.field_types.clone(),
+        ExplicitStructLayout {
+            mem_to_decl: struct_ty.memory_order(),
+            field_offsets: struct_ty.field_offsets().to_vec(),
+            total_size: struct_ty.total_size(),
+        },
+    ))
+}
+
+fn reconstruct_zero_sized(
+    ctx: &mut Context,
+    llvm_block: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    mir_ty: Ptr<TypeObj>,
+) -> std::result::Result<(Value, Ptr<Operation>), anyhow::Error> {
+    let ty = convert_type(ctx, mir_ty)?;
+    let undef = llvm::UndefOp::new(ctx, ty);
+    let undef_op = undef.get_operation();
+    insert_op_sequentially(undef_op, llvm_block, prev_op, ctx);
+    Ok((undef_op.deref(ctx).get_result(0), undef_op))
 }
 
 /// Insert an op sequentially: after `prev` if given, otherwise at block front.

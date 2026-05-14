@@ -47,6 +47,8 @@ pub struct CollectedFunction {
     pub instance: Instance,
     /// True if this is a GPU kernel entry point (has `#[kernel]` attribute).
     pub is_kernel: bool,
+    /// True for closure kernel wrappers using the unified typed launch ABI.
+    pub typed_closure_entry: bool,
     /// The name to export in PTX. For kernels, this is the user-visible name.
     pub export_name: String,
 }
@@ -255,6 +257,7 @@ pub fn run_pipeline(
             &body,
             &func.instance,
             func.is_kernel,
+            func.typed_closure_entry,
             Some(&func.export_name),
             &mut legaliser,
         )

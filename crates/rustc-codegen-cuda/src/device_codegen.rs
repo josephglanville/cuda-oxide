@@ -312,9 +312,9 @@ pub fn generate_device_code<'tcx>(
 
     // Prepare data we need to pass into the stable_mir closure
     // (closures can't capture references to local TyCtxt data)
-    let export_names: Vec<(String, bool)> = functions
+    let export_names: Vec<(String, bool, bool)> = functions
         .iter()
-        .map(|f| (f.export_name.clone(), f.is_kernel))
+        .map(|f| (f.export_name.clone(), f.is_kernel, f.typed_closure_entry))
         .collect();
 
     // Convert device externs to mir-importer format
@@ -415,7 +415,7 @@ pub fn generate_device_code<'tcx>(
         let stable_functions: Vec<mir_importer::CollectedFunction> = functions
             .iter()
             .zip(export_names.iter())
-            .map(|(func, (export_name, is_kernel))| {
+            .map(|(func, (export_name, is_kernel, typed_closure_entry))| {
                 // Use rustc_internal::stable() to convert the Instance.
                 // This is the key bridge between rustc_middle and rustc_public types.
                 let stable_instance = rustc_internal::stable(func.instance);
@@ -423,6 +423,7 @@ pub fn generate_device_code<'tcx>(
                 mir_importer::CollectedFunction {
                     instance: stable_instance,
                     is_kernel: *is_kernel,
+                    typed_closure_entry: *typed_closure_entry,
                     export_name: export_name.clone(),
                 }
             })

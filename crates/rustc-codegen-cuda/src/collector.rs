@@ -159,7 +159,7 @@ enum CollectDecision {
 // "test extern first" ordering dance that lived here previously.
 use reserved_oxide_symbols::{
     device_extern_base_name, is_device_extern_symbol, is_device_symbol, is_kernel_symbol,
-    kernel_base_name,
+    is_typed_kernel_symbol, kernel_base_name, typed_kernel_base_name,
 };
 
 /// Sanitize a symbol name for use as a PTX identifier.
@@ -174,45 +174,19 @@ pub fn sanitize_ptx_name(name: &str) -> String {
     name.replace(['$', '.'], "_")
 }
 
-/// Compute the export name for a kernel, handling closure type parameters specially.
-///
-/// For kernels with closure type parameters (e.g., `map<F: Fn(f32) -> f32>`),
-/// we generate a unique export name based on the closure's source location.
-/// This must match the naming scheme used by the `cuda_launch!` macro at runtime.
-///
-/// The naming scheme uses line number from the closure's definition, which is
-/// available to both the proc-macro (via Span) and the backend (via DefId span).
+/// Compute the export name for a non-typed kernel wrapper.
 ///
 /// For generic kernels with type parameters (like `scale::<f32>`), we append
 /// the sanitized type names to distinguish monomorphizations.
 ///
-/// For non-closure, non-generic kernels, we just return the base name (e.g., "vecadd").
-fn compute_kernel_export_name<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    instance: Instance<'tcx>,
-    base_name: &str,
-) -> String {
-    // Check if any type argument is a closure
-    for arg in instance.args.iter() {
-        if let Some(ty) = arg.as_type()
-            && ty.is_closure()
-        {
-            let closure_def_id = match ty.kind() {
-                rustc_middle::ty::TyKind::Closure(def_id, _) => *def_id,
-                _ => continue,
-            };
-
-            let span = tcx.def_span(closure_def_id);
-            let loc = tcx.sess.source_map().lookup_char_pos(span.lo());
-            let line = loc.line;
-            let col = loc.col.0;
-
-            return format!("{}_L{}C{}", base_name, line, col);
-        }
-    }
-
-    // Check if there are non-closure type parameters (generic kernel)
-    // This handles scale::<f32> vs scale::<i32>
+/// Closure launch APIs target the unified typed wrapper and use
+/// `compute_typed_kernel_export_name`.
+///
+/// For non-generic kernels, we just return the base name (e.g., "vecadd").
+fn compute_kernel_export_name<'tcx>(instance: Instance<'tcx>, base_name: &str) -> String {
+    // Check if there are type parameters (generic kernel). This handles
+    // scale::<f32> vs scale::<i32> for the regular kernel wrapper. Closure
+    // launch APIs do not use this path; they target the typed wrapper.
     let type_args: Vec<_> = instance
         .args
         .iter()
@@ -240,8 +214,23 @@ fn compute_kernel_export_name<'tcx>(
         return format!("{}__{}", base_name, type_suffix);
     }
 
-    // No closure or generic type parameters - use base name
+    // No generic type parameters - use base name.
     base_name.to_string()
+}
+
+fn compute_typed_kernel_export_name<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    instance: Instance<'tcx>,
+    base_name: &str,
+) -> String {
+    let type_args: Vec<Ty<'tcx>> = instance
+        .args
+        .iter()
+        .filter_map(|arg| arg.as_type())
+        .collect();
+    let type_tuple = Ty::new_tup(tcx, &type_args);
+    let type_id = tcx.type_id_hash(type_tuple).as_u128();
+    format!("{base_name}__typed_{type_id:032x}")
 }
 
 /// A function collected for GPU compilation.
@@ -263,6 +252,13 @@ pub struct CollectedFunction<'tcx> {
     /// Kernels are marked with `.entry` in PTX and can be launched from the host.
     /// Non-kernel functions are marked with `.func` and can only be called from device code.
     pub is_kernel: bool,
+
+    /// True for closure kernel wrappers that use the unified typed launch ABI.
+    ///
+    /// These entries use type-identity naming and keep closure parameters
+    /// opaque at the kernel ABI boundary. Typed module launches and the
+    /// lower-level closure launch macros both target these wrappers.
+    pub typed_closure_entry: bool,
 
     /// The name to export in PTX.
     ///
@@ -381,7 +377,8 @@ pub fn count_device_fns_in_cgus<'tcx>(tcx: TyCtxt<'tcx>, cgus: &[CodegenUnit<'tc
 /// └─────────────────┘  └────────────────────────────────────────────────┘
 /// ```
 pub fn is_kernel_function(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
-    is_kernel_symbol(&tcx.def_path_str(def_id))
+    let name = tcx.def_path_str(def_id);
+    is_kernel_symbol(&name) || is_typed_kernel_symbol(&name)
 }
 
 /// Checks if a function is a standalone device function definition.
@@ -490,24 +487,34 @@ pub fn collect_device_functions<'tcx>(
                 }
 
                 let name = tcx.def_path_str(instance.def_id());
+                let typed_closure_entry = is_typed_kernel_symbol(&name);
                 // Extract the kernel base name by stripping the reserved
                 // `cuda_oxide_kernel_<hash>_` prefix. Cross-crate kernels look
                 // like `kernel_lib::cuda_oxide_kernel_<hash>_scale`; the
                 // helper handles both bare and FQDN forms uniformly.
-                let base_name = kernel_base_name(&name)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| name.rsplit("::").next().unwrap_or(&name).to_string());
+                let base_name = if typed_closure_entry {
+                    typed_kernel_base_name(&name)
+                } else {
+                    kernel_base_name(&name)
+                }
+                .map(str::to_string)
+                .unwrap_or_else(|| name.rsplit("::").next().unwrap_or(&name).to_string());
 
                 // Compute a unique export name for this kernel monomorphization.
-                // For closures: uses source location (line/col)
-                // For generics: uses sanitized type names (e.g., "scale__f32")
-                let export_name = compute_kernel_export_name(tcx, *instance, &base_name);
+                // Typed closure wrappers use a TypeId fingerprint of the generic
+                // argument tuple. Other generic kernels use sanitized type names
+                // (e.g., "scale__f32").
+                let export_name = if typed_closure_entry {
+                    compute_typed_kernel_export_name(tcx, *instance, &base_name)
+                } else {
+                    compute_kernel_export_name(*instance, &base_name)
+                };
 
                 if verbose {
                     eprintln!("[collector] Found kernel: {} -> {}", name, export_name);
                 }
 
-                collector.add_root(*instance, true, export_name);
+                collector.add_root(*instance, true, typed_closure_entry, export_name);
             }
         }
     }
@@ -543,7 +550,7 @@ pub fn collect_device_functions<'tcx>(
                     }
 
                     // Add as a non-kernel root — produces .func (not .entry) in PTX
-                    collector.add_root(*instance, false, export_name);
+                    collector.add_root(*instance, false, false, export_name);
                 }
             }
         }
@@ -616,7 +623,13 @@ impl<'tcx> DeviceCollector<'tcx> {
     }
 
     /// Adds a root function (kernel) to start collection from.
-    fn add_root(&mut self, instance: Instance<'tcx>, is_kernel: bool, export_name: String) {
+    fn add_root(
+        &mut self,
+        instance: Instance<'tcx>,
+        is_kernel: bool,
+        typed_closure_entry: bool,
+        export_name: String,
+    ) {
         // Use mangled name as the unique key - this distinguishes different
         // monomorphizations of the same generic function (e.g., map<f32, Closure1>
         // vs map<f32, Closure2>)
@@ -626,6 +639,7 @@ impl<'tcx> DeviceCollector<'tcx> {
             self.worklist.push_back(CollectedFunction {
                 instance,
                 is_kernel,
+                typed_closure_entry,
                 export_name,
             });
         }
@@ -888,6 +902,7 @@ impl<'tcx> DeviceCollector<'tcx> {
                             self.worklist.push_back(CollectedFunction {
                                 instance: closure_instance,
                                 is_kernel: false,
+                                typed_closure_entry: false,
                                 export_name,
                             });
                         }
@@ -977,6 +992,7 @@ impl<'tcx> DeviceCollector<'tcx> {
         self.worklist.push_back(CollectedFunction {
             instance: resolved,
             is_kernel: false,
+            typed_closure_entry: false,
             export_name,
         });
     }

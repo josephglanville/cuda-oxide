@@ -77,6 +77,13 @@ pub const HASH_SUFFIX: &str = "246e25db";
 /// unprefixed base (e.g., `vecadd`).
 pub const KERNEL_PREFIX: &str = "cuda_oxide_kernel_246e25db_";
 
+/// Prefix added to unified closure kernel wrappers.
+///
+/// These wrappers are distinct from [`KERNEL_PREFIX`] entries so all closure
+/// launch APIs can use a type-identity export name and an opaque closure
+/// parameter ABI.
+pub const TYPED_KERNEL_PREFIX: &str = "cuda_oxide_typed_kernel_246e25db_";
+
 /// Prefix added to `#[device]` functions for collector detection.
 ///
 /// `#[device] fn helper(...)` becomes `fn cuda_oxide_device_246e25db_helper(...)`.
@@ -116,6 +123,19 @@ pub const KERNEL_SCOPE_LOCAL: &str = "cuda_oxide_kernel_scope_246e25db";
 /// ```
 pub fn kernel_symbol(base: &str) -> String {
     format!("{KERNEL_PREFIX}{base}")
+}
+
+/// Build the unified closure kernel wrapper symbol for a given base name.
+///
+/// ```
+/// use reserved_oxide_symbols::typed_kernel_symbol;
+/// assert_eq!(
+///     typed_kernel_symbol("map"),
+///     "cuda_oxide_typed_kernel_246e25db_map",
+/// );
+/// ```
+pub fn typed_kernel_symbol(base: &str) -> String {
+    format!("{TYPED_KERNEL_PREFIX}{base}")
 }
 
 /// Build the mangled device-function symbol for a given base name.
@@ -168,6 +188,16 @@ pub fn instantiate_symbol(base: &str) -> String {
 /// ```
 pub fn is_kernel_symbol(name: &str) -> bool {
     name.contains(KERNEL_PREFIX)
+}
+
+/// Returns `true` if `name` is a unified closure kernel wrapper symbol.
+///
+/// ```
+/// use reserved_oxide_symbols::{is_typed_kernel_symbol, typed_kernel_symbol};
+/// assert!(is_typed_kernel_symbol(&typed_kernel_symbol("map")));
+/// ```
+pub fn is_typed_kernel_symbol(name: &str) -> bool {
+    name.contains(TYPED_KERNEL_PREFIX)
 }
 
 /// Returns `true` if `name` is a device-function symbol (excluding extern).
@@ -228,6 +258,20 @@ pub fn kernel_base_name(name: &str) -> Option<&str> {
         .map(|pos| &name[pos + KERNEL_PREFIX.len()..])
 }
 
+/// Strip the typed kernel prefix from a possibly-FQDN symbol name.
+///
+/// ```
+/// use reserved_oxide_symbols::typed_kernel_base_name;
+/// assert_eq!(
+///     typed_kernel_base_name("cuda_oxide_typed_kernel_246e25db_map"),
+///     Some("map"),
+/// );
+/// ```
+pub fn typed_kernel_base_name(name: &str) -> Option<&str> {
+    name.find(TYPED_KERNEL_PREFIX)
+        .map(|pos| &name[pos + TYPED_KERNEL_PREFIX.len()..])
+}
+
 /// Strip the device prefix from a possibly-FQDN symbol name.
 ///
 /// Returns the part after [`DEVICE_PREFIX`], or `None` if `name` is not a
@@ -283,6 +327,8 @@ pub fn device_extern_base_name(name: &str) -> Option<&str> {
 pub fn display_name(name: &str) -> Option<String> {
     if let Some(base) = device_extern_base_name(name) {
         Some(format!("{base} (device extern)"))
+    } else if let Some(base) = typed_kernel_base_name(name) {
+        Some(format!("{base} (typed kernel)"))
     } else if let Some(base) = kernel_base_name(name) {
         Some(format!("{base} (kernel)"))
     } else if let Some(base) = device_base_name(name) {
@@ -322,6 +368,7 @@ mod tests {
     fn hash_value_is_pinned() {
         assert_eq!(HASH_SUFFIX, "246e25db");
         assert_eq!(KERNEL_PREFIX, "cuda_oxide_kernel_246e25db_");
+        assert_eq!(TYPED_KERNEL_PREFIX, "cuda_oxide_typed_kernel_246e25db_");
         assert_eq!(DEVICE_PREFIX, "cuda_oxide_device_246e25db_");
         assert_eq!(DEVICE_EXTERN_PREFIX, "cuda_oxide_device_extern_246e25db_");
         assert_eq!(INSTANTIATE_PREFIX, "cuda_oxide_instantiate_246e25db_");
@@ -330,11 +377,12 @@ mod tests {
     /// Every prefix shares the reserved root. The macro guard checks
     /// for `RESERVED_ROOT` and rejects user-defined names that start
     /// with it; this test ensures the reserved root remains a true
-    /// prefix of all four mangled categories.
+    /// prefix of all mangled categories.
     #[test]
     fn all_prefixes_share_reserved_root() {
         for p in [
             KERNEL_PREFIX,
+            TYPED_KERNEL_PREFIX,
             DEVICE_PREFIX,
             DEVICE_EXTERN_PREFIX,
             INSTANTIATE_PREFIX,
@@ -363,6 +411,10 @@ mod tests {
     fn build_then_extract_round_trips() {
         for base in ["vecadd", "scale", "fast_sqrt", "cub_reduce"] {
             assert_eq!(kernel_base_name(&kernel_symbol(base)), Some(base));
+            assert_eq!(
+                typed_kernel_base_name(&typed_kernel_symbol(base)),
+                Some(base),
+            );
             assert_eq!(device_base_name(&device_symbol(base)), Some(base));
             assert_eq!(
                 device_extern_base_name(&device_extern_symbol(base)),
@@ -412,6 +464,10 @@ mod tests {
             Some("vecadd (kernel)"),
         );
         assert_eq!(
+            display_name(&typed_kernel_symbol("map")).as_deref(),
+            Some("map (typed kernel)"),
+        );
+        assert_eq!(
             display_name(&device_symbol("helper")).as_deref(),
             Some("helper (device)"),
         );
@@ -433,11 +489,13 @@ mod tests {
         // These are the legacy / accidental forms we're defending against.
         for evil in [
             "cuda_oxide_kernel_evil",
+            "cuda_oxide_typed_kernel_evil",
             "cuda_oxide_device_evil",
             "cuda_oxide_device_extern_evil",
             "cuda_oxide_instantiate_evil",
         ] {
             assert!(!is_kernel_symbol(evil), "unexpected match: {evil}");
+            assert!(!is_typed_kernel_symbol(evil), "unexpected match: {evil}");
             assert!(!is_device_symbol(evil), "unexpected match: {evil}");
             assert!(!is_device_extern_symbol(evil), "unexpected match: {evil}");
             assert!(!is_instantiate_symbol(evil), "unexpected match: {evil}");

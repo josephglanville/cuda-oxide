@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#![allow(internal_features)]
+#![feature(core_intrinsics)]
+
 //! Host-side utilities for CUDA kernel development.
 //!
 //! This crate provides CPU-side utilities for preparing data and setting up
@@ -64,7 +67,7 @@ pub mod tiling;
 pub use launch::{
     CudaKernel, GenericCudaKernel, HasLength, KernelScalar, ReadOnly, Scalar, WriteOnly,
     push_kernel_device_slice, push_kernel_scalar, read_only_device_buffer_arg,
-    writable_device_buffer_arg,
+    typed_kernel_ptx_name, writable_device_buffer_arg,
 };
 
 #[cfg(feature = "async")]
